@@ -1,0 +1,37 @@
+{
+  "fill" : "automatic",
+  "groups" : [
+    {
+      "blur-material" : 0.5,
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "nubo.png",
+          "name" : "nubo",
+          "position" : {
+            "scale" : 0.7,
+            "translation-in-points" : [
+              -18.90000000000009,
+              -26
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
