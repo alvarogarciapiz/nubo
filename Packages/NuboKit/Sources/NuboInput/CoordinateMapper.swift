@@ -38,4 +38,18 @@ public struct CoordinateMapper: Sendable {
         let clampedSensitivity = min(max(sensitivity, 0.1), 4)
         return Vector(dx: vector.dx * clampedSensitivity, dy: vector.dy * clampedSensitivity)
     }
+
+    /// Uses the same aspect-fit rectangle as the Metal presentation surface.
+    /// Letterbox input is ignored rather than moved to an unrelated desktop point.
+    public func desktopPoint(viewPoint: Point, viewportWidth: Double, viewportHeight: Double, zoom: Double = 1) -> Point? {
+        guard viewportWidth > 0, viewportHeight > 0, display.pixelWidth > 0,
+              display.pixelHeight > 0, viewPoint.x.isFinite, viewPoint.y.isFinite else { return nil }
+        let scale = min(viewportWidth / Double(display.pixelWidth), viewportHeight / Double(display.pixelHeight)) * max(1, zoom)
+        let width = Double(display.pixelWidth) * scale
+        let height = Double(display.pixelHeight) * scale
+        let x = (viewPoint.x - (viewportWidth - width) / 2) / width
+        let y = (viewPoint.y - (viewportHeight - height) / 2) / height
+        guard (0...1).contains(x), (0...1).contains(y) else { return nil }
+        return desktopPoint(normalized: .init(x: x, y: y))
+    }
 }

@@ -28,6 +28,7 @@ let package = Package(
         .testTarget(name: "NuboCoreTests", dependencies: ["NuboCore"]),
         .testTarget(name: "NuboProtocolTests", dependencies: ["NuboProtocol"]),
         .testTarget(name: "NuboInputTests", dependencies: ["NuboInput"]),
-        .testTarget(name: "NuboNetworkingTests", dependencies: ["NuboNetworking"])
+        .testTarget(name: "NuboNetworkingTests", dependencies: ["NuboNetworking"]),
+        .testTarget(name: "NuboVideoTests", dependencies: ["NuboVideo", "NuboCore"])
     ]
 )

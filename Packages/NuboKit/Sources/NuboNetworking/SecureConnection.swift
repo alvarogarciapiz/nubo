@@ -9,6 +9,7 @@ public enum SecureChannelKind: String, Codable, Sendable {
     case input
     case video
     case audio
+    case preview
 }
 
 public struct PairingHello: Codable, Sendable {
@@ -56,6 +57,7 @@ public struct ResumeAcceptance: Codable, Sendable {
 }
 
 public enum BootstrapMessage: Codable, Sendable {
+    case pairingCommitment(Data)
     case pairingHello(PairingHello)
     case pairingDecision(Bool)
     case resumeHello(ResumeHello)
@@ -148,10 +150,12 @@ public final class NetworkFrameConnection: @unchecked Sendable {
         }
     }
 
-    public func receiveFrame() async throws -> Data {
+    public func receiveFrame(maximumLength: Int = NetworkFrameConnection.maximumFrameLength) async throws -> Data {
         let header = try await receiveExactly(4)
         let length = Int(header.readInteger(UInt32.self))
-        guard length <= Self.maximumFrameLength else { throw SecureConnectionError.oversizedFrame(length) }
+        guard length <= min(maximumLength, Self.maximumFrameLength) else {
+            throw SecureConnectionError.oversizedFrame(length)
+        }
         return try await receiveExactly(length)
     }
 
@@ -231,11 +235,17 @@ public struct SessionKeys: Sendable {
     fileprivate let send: SymmetricKey
     fileprivate let receive: SymmetricKey
 
-    public static func derive(secret: Data, clientNonce: Data, serverNonce: Data, isClient: Bool) -> SessionKeys {
+    public static func derive(
+        secret: Data,
+        clientNonce: Data,
+        serverNonce: Data,
+        channel: SecureChannelKind = .control,
+        isClient: Bool
+    ) -> SessionKeys {
         let master = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: secret),
             salt: clientNonce + serverNonce,
-            info: Data("Nubo secure channel v1".utf8),
+            info: Data("Nubo secure channel v3|\(channel.rawValue)".utf8),
             outputByteCount: 32
         )
         let clientToServer = HKDF<SHA256>.deriveKey(inputKeyMaterial: master, info: Data("client to server".utf8), outputByteCount: 32)
@@ -275,12 +285,20 @@ public enum PeerAuthentication {
 }
 
 public extension NetworkFrameConnection {
+    func cancelAfter(_ duration: Duration) -> Task<Void, Never> {
+        Task { [self] in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            cancel()
+        }
+    }
+
     func sendBootstrap(_ message: BootstrapMessage) async throws {
         try await sendFrame(JSONEncoder().encode(message))
     }
 
     func receiveBootstrap() async throws -> BootstrapMessage {
-        try await JSONDecoder().decode(BootstrapMessage.self, from: receiveFrame())
+        try await JSONDecoder().decode(BootstrapMessage.self, from: receiveFrame(maximumLength: 64 * 1_024))
     }
 }
 

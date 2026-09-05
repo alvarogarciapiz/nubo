@@ -10,18 +10,30 @@ struct NuboMacApp: App {
     var body: some Scene {
         Window("Nubo", id: "onboarding") {
             MacOnboardingView(model: model)
-                .frame(width: 640, height: 520)
+                .frame(width: 720, height: 560)
         }
         .windowResizability(.contentSize)
-        .defaultLaunchBehavior(model.didFinishOnboarding ? .suppressed : .presented)
+        .defaultLaunchBehavior(model.shouldPresentOnboardingAtLaunch ? .presented : .suppressed)
 
-        MenuBarExtra("Nubo", systemImage: model.isReady ? "display.and.arrow.down" : "display.trianglebadge.exclamationmark") {
+        MenuBarExtra {
             NuboMenu(model: model)
+        } label: {
+            HStack(spacing: 4) {
+                Image(nsImage: NuboStatusIcon.image)
+                if model.connectedDeviceName != nil {
+                    Circle().fill(.green).frame(width: 5, height: 5)
+                }
+                if model.showsReadyConfirmation {
+                    Text("Nubo is ready")
+                }
+            }
+            .accessibilityLabel(model.connectedDeviceName.map { "Nubo, connected to \($0)" }
+                ?? (model.isReady ? "Nubo, ready" : "Nubo, setup required"))
         }
 
         Settings {
             MacSettingsView(model: model)
-                .frame(width: 460, height: 280)
+                .frame(width: 480, height: 360)
         }
     }
 }

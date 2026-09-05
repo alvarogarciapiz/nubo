@@ -4,6 +4,84 @@ import NuboProtocol
 import XCTest
 
 final class SecureSessionIntegrationTests: XCTestCase {
+    func testPreviewRequiresSavedTrustAndCannotInjectInput() async throws {
+        let clientID = UUID()
+        let hostID = UUID()
+        let secret = Data(repeating: 42, count: 32)
+        let hostStore = MemoryCredentialStore()
+        let clientStore = MemoryCredentialStore()
+        try await hostStore.save(.init(peerID: clientID, peerName: "iPad", sharedSecret: secret))
+        let credential = PairedCredential(peerID: hostID, peerName: "Mac", sharedSecret: secret)
+        try await clientStore.save(credential)
+        let host = NuboHostServer(identity: .init(id: hostID, name: "Mac"), credentialStore: hostStore)
+        let events = await host.events()
+        let observer = Task {
+            for await event in events {
+                switch event {
+                case let .message(peerID, .previewRequest):
+                    try await host.send(.previewImage(jpeg: Data([1, 2, 3]), capturedAt: Date(timeIntervalSince1970: 0)), to: peerID, channel: .preview)
+                case .message(_, .pointer): XCTFail("Preview channel forwarded input")
+                case .pairingRequested: XCTFail("A preview must never request pairing")
+                default: break
+                }
+            }
+        }
+        let port = UInt16.random(in: 54_000...59_000)
+        try await host.start(port: port)
+        try await Task.sleep(for: .milliseconds(50))
+        let client = SecureSessionClient(credentialStore: clientStore)
+        let endpoint = ConnectionEndpoint.manual(host: "127.0.0.1", port: port)
+        do {
+            _ = try await client.resume(endpoint: endpoint, identity: .init(id: UUID(), name: "Unknown"), credential: credential, channel: .preview)
+            XCTFail("Unknown device accessed preview")
+        } catch { /* Expected: unknown device has no host-side trust. */ }
+        let preview = try await client.resume(endpoint: endpoint, identity: .init(id: clientID, name: "iPad"), credential: credential, channel: .preview)
+        try await preview.send(.previewRequest)
+        let response = try await preview.receive()
+        XCTAssertEqual(response, .previewImage(jpeg: Data([1, 2, 3]), capturedAt: Date(timeIntervalSince1970: 0)))
+        try await preview.send(.pointer(.relativeMotion(.init(dx: 1, dy: 1))))
+        do {
+            _ = try await preview.receive()
+            XCTFail("Input sent over preview should close that channel")
+        } catch { /* Host rejected the wrong channel. */ }
+        try await client.forget(peerID: hostID)
+        let forgotten = try await client.savedCredential(for: hostID)
+        XCTAssertNil(forgotten)
+        await preview.cancel()
+        await host.stop()
+        observer.cancel()
+    }
+    func testDeniedPairingDoesNotPersistCredentials() async throws {
+        let hostID = UUID()
+        let clientID = UUID()
+        let hostStore = MemoryCredentialStore()
+        let clientStore = MemoryCredentialStore()
+        let host = NuboHostServer(identity: .init(id: hostID, name: "Mac"), credentialStore: hostStore)
+        let events = await host.events()
+        let observer = Task {
+            for await event in events {
+                if case let .pairingRequested(id, _, _) = event {
+                    await host.decidePairing(requestID: id, accepted: false)
+                }
+            }
+        }
+        let port = UInt16.random(in: 54_000...59_000)
+        try await host.start(port: port)
+        try await Task.sleep(for: .milliseconds(50))
+        do {
+            _ = try await SecureSessionClient(credentialStore: clientStore).connect(
+                to: .manual(host: "127.0.0.1", port: port), identity: .init(id: clientID, name: "iPad"), expectedPeerID: nil,
+                approvePairing: { _, _ in true }
+            )
+            XCTFail("A denied request must never connect")
+        } catch { /* Denial closes the unauthenticated connection. */ }
+        let hostCredential = try await hostStore.credential(for: clientID)
+        let clientCredential = try await clientStore.credential(for: hostID)
+        XCTAssertNil(hostCredential)
+        XCTAssertNil(clientCredential)
+        await host.stop()
+        observer.cancel()
+    }
     func testPairingAndEncryptedRoundTripOnLoopback() async throws {
         let port = UInt16.random(in: 54_000...59_000)
         let hostStore = MemoryCredentialStore()
@@ -18,10 +96,10 @@ final class SecureSessionIntegrationTests: XCTestCase {
                     await host.decidePairing(requestID: requestID, accepted: true)
                 case let .message(peerID, .ping(value)):
                     try await host.send(.pong(value), to: peerID, channel: .control)
-                case let .message(peerID, .pointer):
-                    try await host.send(.pong(777), to: peerID, channel: .input)
-                case let .message(peerID, .videoFrame(frame)):
-                    try await host.send(.videoFrame(frame), to: peerID, channel: .input)
+                case let .message(peerID, .pointer(event)):
+                    try await host.send(.pointer(event), to: peerID, channel: .input)
+                case let .message(peerID, .clipboardText(id, text)):
+                    try await host.send(.clipboardText(id: id, text: text), to: peerID, channel: .control)
                 default:
                     break
                 }
@@ -60,9 +138,10 @@ final class SecureSessionIntegrationTests: XCTestCase {
             credential: resumed.credential,
             channel: .input
         )
-        try await input.send(.pointer(.relativeMotion(.init(dx: 2, dy: -3))))
+        let pointerMessage = NuboMessage.pointer(.relativeMotion(.init(dx: 2, dy: -3)))
+        try await input.send(pointerMessage)
         let inputResponse = try await input.receive()
-        XCTAssertEqual(inputResponse, .pong(777))
+        XCTAssertEqual(inputResponse, pointerMessage)
 
         var roundTripMilliseconds: [Double] = []
         for sequence in 0..<100 {
@@ -79,22 +158,16 @@ final class SecureSessionIntegrationTests: XCTestCase {
         print(String(format: "Nubo encrypted loopback RTT: p50 %.3f ms, p95 %.3f ms", p50, p95))
         XCTAssertLessThan(p95, 20, "Encrypted control traffic should remain interactive on loopback")
 
-        let payload = Data(repeating: 0xA5, count: 1_024 * 1_024)
+        let payload = String(repeating: "A", count: 1_024 * 1_024)
         let throughputStarted = DispatchTime.now().uptimeNanoseconds
         for sequence in 0..<8 {
-            let frame = EncodedVideoFrame(
-                sequence: UInt64(sequence),
-                presentationTimeNanoseconds: UInt64(sequence),
-                displayID: .init(rawValue: 1),
-                isKeyFrame: sequence == 0,
-                bytes: payload
-            )
-            try await input.send(.videoFrame(frame))
-            let echo = try await input.receive()
-            XCTAssertEqual(echo, .videoFrame(frame))
+            let message = NuboMessage.clipboardText(id: UUID(), text: payload)
+            try await resumed.control.send(message)
+            let echo = try await resumed.control.receive()
+            XCTAssertEqual(echo, message, "Iteration \(sequence) must round-trip intact")
         }
         let throughputSeconds = Double(DispatchTime.now().uptimeNanoseconds - throughputStarted) / 1_000_000_000
-        let aggregateMbps = Double(payload.count * 8 * 2 * 8) / throughputSeconds / 1_000_000
+        let aggregateMbps = Double(payload.utf8.count * 8 * 2 * 8) / throughputSeconds / 1_000_000
         print(String(format: "Nubo encrypted loopback throughput: %.1f Mbps aggregate", aggregateMbps))
         XCTAssertGreaterThan(aggregateMbps, 20, "Encrypted framing should not be a throughput bottleneck")
 

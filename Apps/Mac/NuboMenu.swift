@@ -45,17 +45,32 @@ struct NuboMenu: View {
 
 struct MacSettingsView: View {
     @Bindable var model: MacAppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Form {
-            Toggle("Start Nubo at login", isOn: Binding(
-                get: { model.startAtLogin },
-                set: { model.setStartAtLogin($0) }
-            ))
-            LabeledContent("Service port", value: "49832")
-            Text("Nubo accepts only authenticated, encrypted sessions. Bonjour is discovery only.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Section("General") {
+                Toggle("Start Nubo at login", isOn: Binding(
+                    get: { model.startAtLogin },
+                    set: { model.setStartAtLogin($0) }
+                ))
+                LabeledContent("Status", value: model.isReady ? "Ready" : "Setup required")
+                Button("Review Permissions…") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "onboarding")
+                }
+            }
+
+            Section("Network") {
+                LabeledContent("Service port", value: "49832")
+                LabeledContent("Discovery", value: "Bonjour")
+            }
+
+            Section {
+                Text("Connections are authenticated and encrypted. Bonjour is used only to discover this Mac on the local network.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()

@@ -34,7 +34,9 @@ public actor KeychainCredentialStore: CredentialStore {
     public func save(_ credential: PairedCredential) async throws {
         let data = try JSONEncoder().encode(credential)
         let query = baseQuery(peerID: credential.peerID)
-        SecItemDelete(query as CFDictionary)
+        let update = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if update == errSecSuccess { return }
+        guard update == errSecItemNotFound else { throw CredentialStoreError.keychain(update) }
         var attributes = query
         attributes[kSecValueData as String] = data
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly

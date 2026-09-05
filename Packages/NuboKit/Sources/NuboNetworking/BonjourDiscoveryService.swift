@@ -8,6 +8,7 @@ public final class BonjourDiscoveryService: DiscoveryService, @unchecked Sendabl
     private var browser: NWBrowser?
     private var currentHosts: [DiscoveredHost] = []
     private var continuations: [UUID: AsyncStream<[DiscoveredHost]>.Continuation] = [:]
+    private var shouldRun = false
 
     public init() {}
 
@@ -26,6 +27,7 @@ public final class BonjourDiscoveryService: DiscoveryService, @unchecked Sendabl
 
     public func start() {
         lock.withLock {
+            shouldRun = true
             guard browser == nil else { return }
             let parameters = NWParameters.tcp
             parameters.includePeerToPeer = true
@@ -33,12 +35,15 @@ public final class BonjourDiscoveryService: DiscoveryService, @unchecked Sendabl
                 for: .bonjour(type: NuboConstants.serviceType, domain: nil),
                 using: parameters
             )
-            browser.browseResultsChangedHandler = { [weak self] results, _ in
-                self?.update(results)
+            browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
+                guard let browser else { return }
+                self?.update(results, from: browser)
             }
-            browser.stateUpdateHandler = { state in
+            browser.stateUpdateHandler = { [weak self, weak browser] state in
                 if case let .failed(error) = state {
                     NuboLog.networking.error("Bonjour discovery failed: \(error.localizedDescription, privacy: .public)")
+                    guard let browser else { return }
+                    self?.recover(from: browser)
                 }
             }
             self.browser = browser
@@ -48,13 +53,15 @@ public final class BonjourDiscoveryService: DiscoveryService, @unchecked Sendabl
 
     public func stop() {
         let browser = lock.withLock { () -> NWBrowser? in
+            shouldRun = false
             defer { self.browser = nil }
             return self.browser
         }
         browser?.cancel()
+        publish([])
     }
 
-    private func update(_ results: Set<NWBrowser.Result>) {
+    private func update(_ results: Set<NWBrowser.Result>, from source: NWBrowser) {
         let hosts = results.compactMap { result -> DiscoveredHost? in
             guard case let .service(name, _, domain, _) = result.endpoint else { return nil }
             let metadata: (UUID?, UInt16?) = if case let .bonjour(record) = result.metadata {
@@ -72,6 +79,15 @@ public final class BonjourDiscoveryService: DiscoveryService, @unchecked Sendabl
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         let continuations = lock.withLock { () -> [AsyncStream<[DiscoveredHost]>.Continuation] in
+            guard shouldRun, browser === source else { return [] }
+            currentHosts = hosts
+            return Array(self.continuations.values)
+        }
+        continuations.forEach { $0.yield(hosts) }
+    }
+
+    private func publish(_ hosts: [DiscoveredHost]) {
+        let continuations = lock.withLock { () -> [AsyncStream<[DiscoveredHost]>.Continuation] in
             currentHosts = hosts
             return Array(self.continuations.values)
         }
@@ -80,6 +96,19 @@ public final class BonjourDiscoveryService: DiscoveryService, @unchecked Sendabl
 
     private func removeContinuation(_ id: UUID) {
         lock.withLock { _ = continuations.removeValue(forKey: id) }
+    }
+
+    private func recover(from failedBrowser: NWBrowser) {
+        let restart = lock.withLock { () -> Bool in
+            guard browser === failedBrowser else { return false }
+            browser = nil
+            return shouldRun
+        }
+        failedBrowser.cancel()
+        guard restart else { return }
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.start()
+        }
     }
 }
 

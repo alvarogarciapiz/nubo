@@ -38,6 +38,15 @@ final class WireCodecTests: XCTestCase {
         XCTAssertEqual(try result.map(codec.decode), [.ping(1), .pong(1)])
     }
 
+    func testKeyFrameRequestRoundTripsOnControlChannel() throws {
+        let codec = MessageCodec()
+        var decoder = WireDecoder()
+        let envelope = try XCTUnwrap(decoder.append(codec.encode(.requestKeyFrame)).first)
+
+        XCTAssertEqual(envelope.channel, .control)
+        XCTAssertEqual(try codec.decode(envelope), .requestKeyFrame)
+    }
+
     func testRejectsInvalidMagic() {
         var decoder = WireDecoder()
         XCTAssertThrowsError(try decoder.append(Data(repeating: 0, count: WireEnvelope.headerLength))) { error in
@@ -60,5 +69,36 @@ final class WireCodecTests: XCTestCase {
         XCTAssertEqual(envelope.flags, 1)
         XCTAssertEqual(envelope.payload.count, 1_021)
         XCTAssertEqual(try codec.decode(envelope), .videoFrame(frame))
+    }
+
+    func testPointerAndKeyboardUseCompactBinaryPayloads() throws {
+        let messages: [NuboMessage] = [
+            .pointer(.relativeMotion(.init(dx: 12.25, dy: -8.5))),
+            .pointer(.scroll(.init(dx: 0.75, dy: 31.5), isPrecise: true)),
+            .pointer(.button(.right, .down, clickCount: 2)),
+            .key(.init(
+                hidUsage: 0x04,
+                characters: "a",
+                isDown: true,
+                isRepeat: false,
+                modifiers: [.command, .shift]
+            ))
+        ]
+        let codec = MessageCodec()
+
+        for message in messages {
+            var decoder = WireDecoder()
+            let envelope = try XCTUnwrap(decoder.append(codec.encode(message)).first)
+            XCTAssertEqual(envelope.channel, .input)
+            XCTAssertEqual(envelope.flags, 2)
+            XCTAssertLessThan(envelope.payload.count, 20)
+            XCTAssertEqual(try codec.decode(envelope), message)
+        }
+    }
+
+    func testRejectsMalformedBinaryInput() {
+        XCTAssertThrowsError(try MessageCodec().decode(.init(channel: .input, flags: 2, payload: Data([1, 0])))) { error in
+            XCTAssertEqual(error as? WireCodecError, .malformedPayload)
+        }
     }
 }

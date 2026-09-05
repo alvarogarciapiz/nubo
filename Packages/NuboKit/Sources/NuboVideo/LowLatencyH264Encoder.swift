@@ -4,10 +4,18 @@ import Foundation
 import NuboCore
 @preconcurrency import VideoToolbox
 
-public enum VideoEncoderError: Error {
+public enum VideoEncoderError: LocalizedError {
     case sessionCreation(OSStatus)
     case property(OSStatus, String)
     case encode(OSStatus)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .sessionCreation(status): "Hardware video encoder could not start (\(status))."
+        case let .property(status, key): "Video encoder rejected \(key) (\(status))."
+        case let .encode(status): "Video frame encoding failed (\(status))."
+        }
+    }
 }
 
 public final class LowLatencyH264Encoder: VideoEncoding, @unchecked Sendable {
@@ -16,28 +24,44 @@ public final class LowLatencyH264Encoder: VideoEncoding, @unchecked Sendable {
     private let lock = NSLock()
     private var session: VTCompressionSession?
     private var configuration: StreamConfiguration
+    private var forceNextKeyFrame = false
     private let output: Output
+    public let codec: VideoCodec
 
-    public init(configuration: StreamConfiguration, output: @escaping Output) throws {
+    public init(configuration: StreamConfiguration, codec: VideoCodec = .h264, output: @escaping Output) throws {
+        self.codec = codec
         self.configuration = configuration
         self.output = output
         try createSession(configuration: configuration)
     }
 
     public func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) throws {
-        let (session, framesPerSecond) = lock.withLock { (self.session, configuration.framesPerSecond) }
+        let (session, framesPerSecond, forceKeyFrame) = lock.withLock {
+            let request = forceNextKeyFrame
+            forceNextKeyFrame = false
+            return (self.session, configuration.framesPerSecond, request)
+        }
         guard let session else { return }
         let duration = CMTime(value: 1, timescale: CMTimeScale(framesPerSecond))
+        let frameProperties = forceKeyFrame
+            ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary
+            : nil
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: presentationTime,
             duration: duration,
-            frameProperties: nil,
+            frameProperties: frameProperties,
             sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
         guard status == noErr else { throw VideoEncoderError.encode(status) }
+    }
+
+    /// Forces the next submitted frame to be independently decodable. This is
+    /// used after network backpressure drops an encoded inter-frame.
+    public func requestKeyFrame() {
+        lock.withLock { forceNextKeyFrame = true }
     }
 
     public func update(configuration: StreamConfiguration) throws {
@@ -78,7 +102,7 @@ public final class LowLatencyH264Encoder: VideoEncoding, @unchecked Sendable {
             allocator: kCFAllocatorDefault,
             width: Int32(configuration.width),
             height: Int32(configuration.height),
-            codecType: kCMVideoCodecType_H264,
+            codecType: codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
             encoderSpecification: specification,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -89,10 +113,14 @@ public final class LowLatencyH264Encoder: VideoEncoding, @unchecked Sendable {
         guard status == noErr, let newSession else { throw VideoEncoderError.sessionCreation(status) }
         try set(true, key: kVTCompressionPropertyKey_RealTime, on: newSession)
         try set(false, key: kVTCompressionPropertyKey_AllowFrameReordering, on: newSession)
+        // Hardware support for these tuning hints varies. An unsupported hint
+        // must not prevent an otherwise valid hardware encoder from starting.
+        _ = VTSessionSetProperty(newSession, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 1 as CFNumber)
+        _ = VTSessionSetProperty(newSession, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         try set(configuration.framesPerSecond, key: kVTCompressionPropertyKey_ExpectedFrameRate, on: newSession)
         try set(configuration.bitrate, key: kVTCompressionPropertyKey_AverageBitRate, on: newSession)
         try set(configuration.keyFrameInterval, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, on: newSession)
-        try set(kVTProfileLevel_H264_High_AutoLevel, key: kVTCompressionPropertyKey_ProfileLevel, on: newSession)
+        try set(codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel, key: kVTCompressionPropertyKey_ProfileLevel, on: newSession)
         VTCompressionSessionPrepareToEncodeFrames(newSession)
         lock.withLock { session = newSession }
     }
@@ -127,6 +155,20 @@ public final class LowLatencyH264Encoder: VideoEncoding, @unchecked Sendable {
 
     private static func h264ParameterSets(from formatDescription: CMFormatDescription?) -> [Data] {
         guard let formatDescription else { return [] }
+        if CMFormatDescriptionGetMediaSubType(formatDescription) == kCMVideoCodecType_HEVC {
+            var count = 0
+            guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(formatDescription, parameterSetIndex: 0,
+                parameterSetPointerOut: nil, parameterSetSizeOut: nil, parameterSetCountOut: &count,
+                nalUnitHeaderLengthOut: nil) == noErr else { return [] }
+            return (0..<count).compactMap { index in
+                var pointer: UnsafePointer<UInt8>?
+                var size = 0
+                guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(formatDescription, parameterSetIndex: index,
+                    parameterSetPointerOut: &pointer, parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                    nalUnitHeaderLengthOut: nil) == noErr, let pointer else { return nil }
+                return Data(bytes: pointer, count: size)
+            }
+        }
         var count = 0
         guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
             formatDescription,

@@ -10,6 +10,7 @@ public enum NuboChannel: UInt8, Codable, CaseIterable, Sendable {
     case control = 6
     case statistics = 7
     case configuration = 8
+    case preview = 9
 }
 
 public struct Handshake: Codable, Equatable, Sendable {
@@ -89,8 +90,14 @@ public enum NuboMessage: Codable, Equatable, Sendable {
     case clipboardText(id: UUID, text: String)
     case displays([DisplayDescriptor])
     case selectDisplay(DisplayID)
+    case requestKeyFrame
     case networkStats(ConnectionMetrics)
     case streamConfiguration(StreamConfiguration)
+    case preferredVideoCodec(VideoCodec)
+    case desktopViewport(width: Int, height: Int, enabled: Bool)
+    case desktopViewportStatus(String)
+    case previewRequest
+    case previewImage(jpeg: Data, capturedAt: Date)
     case ping(UInt64)
     case pong(UInt64)
     case disconnect(reason: String?)
@@ -102,9 +109,10 @@ public enum NuboMessage: Codable, Equatable, Sendable {
         case .audioPacket: .audio
         case .pointer, .key: .input
         case .clipboardText: .clipboard
-        case .displays, .selectDisplay, .ping, .pong: .control
+        case .displays, .selectDisplay, .requestKeyFrame, .ping, .pong: .control
         case .networkStats: .statistics
-        case .streamConfiguration: .configuration
+        case .streamConfiguration, .preferredVideoCodec, .desktopViewport, .desktopViewportStatus: .configuration
+        case .previewRequest, .previewImage: .preview
         }
     }
 }

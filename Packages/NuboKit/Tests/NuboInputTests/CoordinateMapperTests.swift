@@ -4,6 +4,14 @@ import NuboProtocol
 import XCTest
 
 final class CoordinateMapperTests: XCTestCase {
+    func testAspectFitMappingRejectsLetterboxAndAccountsForZoom() {
+        let display = DisplayDescriptor(id: .init(rawValue: 7), name: "Retina", pixelWidth: 3000, pixelHeight: 2000, scale: 2, originX: -1500, originY: -100, isPrimary: false)
+        let mapper = CoordinateMapper(display: display)
+        XCTAssertNil(mapper.desktopPoint(viewPoint: .init(x: 1, y: 400), viewportWidth: 1600, viewportHeight: 800))
+        XCTAssertEqual(mapper.desktopPoint(viewPoint: .init(x: 800, y: 400), viewportWidth: 1600, viewportHeight: 800), .init(x: -750, y: 400))
+        XCTAssertEqual(mapper.desktopPoint(viewPoint: .init(x: 200, y: 400), viewportWidth: 1600, viewportHeight: 800, zoom: 2), .init(x: -1125, y: 400))
+        XCTAssertNil(mapper.desktopPoint(viewPoint: .init(x: .nan, y: 0), viewportWidth: 1600, viewportHeight: 800))
+    }
     func testMapsNormalizedPointIntoNegativeOriginDisplay() {
         let display = DisplayDescriptor(
             id: DisplayID(rawValue: 2),

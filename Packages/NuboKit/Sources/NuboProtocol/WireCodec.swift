@@ -1,4 +1,5 @@
 import Foundation
+import NuboCore
 
 public enum WireCodecError: Error, Equatable {
     case invalidMagic
@@ -19,7 +20,7 @@ public struct WireEnvelope: Equatable, Sendable {
     public let flags: UInt8
     public let payload: Data
 
-    public init(version: UInt16 = 1, channel: NuboChannel, flags: UInt8 = 0, payload: Data) {
+    public init(version: UInt16 = NuboConstants.protocolVersion, channel: NuboChannel, flags: UInt8 = 0, payload: Data) {
         self.version = version
         self.channel = channel
         self.flags = flags
@@ -53,7 +54,7 @@ public struct WireDecoder: Sendable {
             let magic = buffer.readBigEndian(UInt32.self, at: 0)
             guard magic == WireEnvelope.magic else { throw WireCodecError.invalidMagic }
             let version = buffer.readBigEndian(UInt16.self, at: 4)
-            guard version == 1 else { throw WireCodecError.unsupportedVersion(version) }
+            guard version == NuboConstants.protocolVersion else { throw WireCodecError.unsupportedVersion(version) }
             let rawChannel = buffer[6]
             guard let channel = NuboChannel(rawValue: rawChannel) else {
                 throw WireCodecError.invalidChannel(rawChannel)
@@ -99,6 +100,12 @@ public struct MessageCodec: Sendable {
             payload.append(packet.bytes)
             return try WireEnvelope(channel: .audio, flags: 1, payload: payload).encoded()
         }
+        if case let .pointer(event) = message {
+            return try WireEnvelope(channel: .input, flags: 2, payload: encodePointer(event)).encoded()
+        }
+        if case let .key(event) = message {
+            return try WireEnvelope(channel: .input, flags: 2, payload: encodeKey(event)).encoded()
+        }
         return try WireEnvelope(channel: message.channel, payload: encoder.encode(message)).encoded()
     }
 
@@ -121,9 +128,102 @@ public struct MessageCodec: Sendable {
                 bytes: Data(envelope.payload.dropFirst(16))
             ))
         }
+        if envelope.channel == .input, envelope.flags == 2 {
+            return try decodeInput(envelope.payload)
+        }
         let message = try decoder.decode(NuboMessage.self, from: envelope.payload)
         guard message.channel == envelope.channel else { throw WireCodecError.channelMismatch }
         return message
+    }
+
+    private func encodePointer(_ event: PointerEvent) -> Data {
+        var payload = Data()
+        switch event {
+        case let .relativeMotion(vector):
+            payload.append(1)
+            payload.appendBigEndian(vector.dx.bitPattern)
+            payload.appendBigEndian(vector.dy.bitPattern)
+        case let .absoluteMotion(point):
+            payload.append(2)
+            payload.appendBigEndian(point.x.bitPattern)
+            payload.appendBigEndian(point.y.bitPattern)
+        case let .button(button, phase, clickCount):
+            payload.append(3)
+            payload.append(button.rawValue)
+            payload.append(phase.rawValue)
+            payload.appendBigEndian(UInt16(clamping: clickCount))
+        case let .scroll(vector, isPrecise):
+            payload.append(4)
+            payload.appendBigEndian(vector.dx.bitPattern)
+            payload.appendBigEndian(vector.dy.bitPattern)
+            payload.append(isPrecise ? 1 : 0)
+        }
+        return payload
+    }
+
+    private func encodeKey(_ event: KeyInputEvent) throws -> Data {
+        let characters = Data((event.characters ?? "").utf8)
+        guard characters.count <= UInt16.max else { throw WireCodecError.malformedPayload }
+        var payload = Data()
+        payload.append(5)
+        payload.appendBigEndian(event.hidUsage)
+        payload.append((event.isDown ? 1 : 0) | (event.isRepeat ? 2 : 0))
+        payload.appendBigEndian(event.modifiers.rawValue)
+        payload.appendBigEndian(UInt16(characters.count))
+        payload.append(characters)
+        return payload
+    }
+
+    private func decodeInput(_ payload: Data) throws -> NuboMessage {
+        guard let kind = payload.first else { throw WireCodecError.malformedPayload }
+        switch kind {
+        case 1:
+            guard payload.count == 17 else { throw WireCodecError.malformedPayload }
+            return .pointer(.relativeMotion(.init(
+                dx: Double(bitPattern: payload.readBigEndian(UInt64.self, at: 1)),
+                dy: Double(bitPattern: payload.readBigEndian(UInt64.self, at: 9))
+            )))
+        case 2:
+            guard payload.count == 17 else { throw WireCodecError.malformedPayload }
+            return .pointer(.absoluteMotion(.init(
+                x: Double(bitPattern: payload.readBigEndian(UInt64.self, at: 1)),
+                y: Double(bitPattern: payload.readBigEndian(UInt64.self, at: 9))
+            )))
+        case 3:
+            guard payload.count == 5,
+                  let button = MouseButton(rawValue: payload[1]),
+                  let phase = ButtonPhase(rawValue: payload[2]) else {
+                throw WireCodecError.malformedPayload
+            }
+            return .pointer(.button(
+                button,
+                phase,
+                clickCount: Int(payload.readBigEndian(UInt16.self, at: 3))
+            ))
+        case 4:
+            guard payload.count == 18 else { throw WireCodecError.malformedPayload }
+            return .pointer(.scroll(.init(
+                dx: Double(bitPattern: payload.readBigEndian(UInt64.self, at: 1)),
+                dy: Double(bitPattern: payload.readBigEndian(UInt64.self, at: 9))
+            ), isPrecise: payload[17] != 0))
+        case 5:
+            guard payload.count >= 8 else { throw WireCodecError.malformedPayload }
+            let characterLength = Int(payload.readBigEndian(UInt16.self, at: 6))
+            guard payload.count == 8 + characterLength,
+                  let characters = String(data: payload.subdata(in: 8..<payload.count), encoding: .utf8) else {
+                throw WireCodecError.malformedPayload
+            }
+            let state = payload[3]
+            return .key(.init(
+                hidUsage: payload.readBigEndian(UInt16.self, at: 1),
+                characters: characters.isEmpty ? nil : characters,
+                isDown: state & 1 != 0,
+                isRepeat: state & 2 != 0,
+                modifiers: .init(rawValue: payload.readBigEndian(UInt16.self, at: 4))
+            ))
+        default:
+            throw WireCodecError.malformedPayload
+        }
     }
 }
 

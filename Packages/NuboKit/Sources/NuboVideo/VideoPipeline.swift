@@ -3,11 +3,6 @@ import CoreVideo
 import Foundation
 import NuboCore
 
-public enum VideoCodec: String, Codable, Sendable {
-    case h264
-    case hevc
-}
-
 public struct VideoPacket: @unchecked Sendable {
     public let data: Data
     public let presentationTime: CMTime

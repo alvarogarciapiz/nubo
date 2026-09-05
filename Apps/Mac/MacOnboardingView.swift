@@ -1,9 +1,11 @@
+import AppKit
 import NuboDesign
 import SwiftUI
 
 struct MacOnboardingView: View {
     @Bindable var model: MacAppModel
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var completedCount: Int {
         PermissionKind.allCases.filter(isGranted).count
@@ -14,138 +16,249 @@ struct MacOnboardingView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            permissionProgress
-                .padding(.top, 34)
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            detail
+        }
+        .task {
+            while !Task.isCancelled {
+                model.refreshPermissions()
+                try? await Task.sleep(for: .milliseconds(750))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.verifyPermissionsAfterReturning() }
+        }
+    }
 
-            Group {
-                if let currentPermission {
-                    permissionStep(currentPermission)
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
-                } else {
-                    readyStep
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 44, height: 44)
+                .accessibilityHidden(true)
+
+            Text("Nubo")
+                .font(.title2.weight(.semibold))
+                .padding(.top, 14)
+            Text("Set up this Mac")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 3)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(PermissionKind.allCases) { permission in
+                    permissionRow(permission)
                 }
             }
-            .padding(.top, 20)
-            .animation(NuboDesign.quietAnimation, value: completedCount)
+            .padding(.top, 34)
 
-            Spacer(minLength: 28)
-            footer
-        }
-        .padding(.horizontal, 52)
-        .padding(.vertical, 40)
-        .task {
-            while !Task.isCancelled, !model.isReady {
-                model.refreshPermissions()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-    }
+            Spacer()
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Image(systemName: "display.and.arrow.down")
-                .font(.system(size: 25, weight: .medium))
-                .accessibilityHidden(true)
-            Text("Welcome to Nubo")
-                .font(.system(size: 32, weight: .semibold))
-            Text("Three quick permissions make this Mac ready for secure remote control.")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var permissionProgress: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(model.isReady ? "Setup complete" : "Step \(min(completedCount + 1, 3)) of 3")
-                    .font(.callout.weight(.medium))
-                Spacer()
-                Text("\(completedCount)/3")
-                    .font(.callout.monospacedDigit())
+            HStack(spacing: 8) {
+                if model.isReady {
+                    Image(systemName: "checkmark")
+                } else if !model.requestedPermissions.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(model.isReady ? "Setup complete" : "Checking automatically")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+        .padding(28)
+        .frame(width: 232, alignment: .leading)
+        .background(Color.primary.opacity(0.035))
+    }
 
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { index in
-                    Capsule()
-                        .fill(index < completedCount ? Color.primary : Color.primary.opacity(0.12))
-                        .frame(height: 3)
-                }
+    private func permissionRow(_ permission: PermissionKind) -> some View {
+        let granted = isGranted(permission)
+        let active = permission == currentPermission
+
+        return HStack(spacing: 11) {
+            Image(systemName: granted ? "checkmark.circle.fill" : active ? "circle.inset.filled" : "circle")
+                .symbolRenderingMode(.monochrome)
+                .font(.body)
+                .foregroundStyle(granted || active ? .primary : .tertiary)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(permission.title)
+                    .font(.callout.weight(active ? .semibold : .regular))
+                Text(granted ? "Enabled" : active ? "Current step" : "Not configured")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .padding(.vertical, 7)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var detail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                Group {
+                    if let currentPermission {
+                        permissionStep(currentPermission)
+                            .id(currentPermission)
+                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .trailing)))
+                    } else {
+                        readyStep
+                            .transition(.opacity)
+                    }
+                }
+                .animation(reduceMotion ? nil : NuboDesign.quietAnimation, value: completedCount)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Spacer(minLength: 20)
+            Divider()
+                .padding(.bottom, 20)
+            footer
+        }
+        .padding(36)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func permissionStep(_ permission: PermissionKind) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 15) {
-                Image(systemName: symbol(for: permission))
-                    .font(.system(size: 19, weight: .medium))
-                    .frame(width: 25)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("STEP \(completedCount + 1) OF \(PermissionKind.allCases.count)")
+                .font(.caption.weight(.medium))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(permission.title)
-                        .font(.headline)
-                    Text(permission.explanation)
-                        .foregroundStyle(.secondary)
-                    Text(detail(for: permission))
-                        .font(.callout)
-                        .foregroundStyle(.secondary.opacity(0.78))
-                        .fixedSize(horizontal: false, vertical: true)
+            Image(systemName: symbol(for: permission))
+                .font(.system(size: 30, weight: .regular))
+                .symbolRenderingMode(.monochrome)
+                .padding(.top, 28)
+                .accessibilityHidden(true)
+
+            Text(permission.title)
+                .font(.title.weight(.semibold))
+                .padding(.top, 18)
+            Text(permission.explanation)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+
+            Divider()
+                .padding(.vertical, 24)
+
+            Text("What to do")
+                .font(.headline)
+            Text(instructions(for: permission))
+                .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 10)
+            Text(detail(for: permission))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 7)
+
+            if permission == .screenRecording,
+               model.requestedPermissions.contains(.screenRecording),
+               !model.screenRecordingGranted {
+                Button("Show this copy of Nubo in Finder") {
+                    model.revealCurrentAppInFinder()
                 }
+                .buttonStyle(.link)
+                .padding(.top, 14)
             }
 
-            Button(actionTitle(for: permission)) {
-                model.request(permission)
+            if permission == .screenRecording, model.screenRecordingMayNeedRelaunch {
+                Label(
+                    "macOS may quit Nubo after this permission changes. Reopen it to continue here.",
+                    systemImage: "arrow.clockwise"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 14)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.primary)
-            .controlSize(.large)
-            .keyboardShortcut(.defaultAction)
-        }
-        .padding(22)
-        .background(NuboDesign.secondaryFill)
-        .clipShape(RoundedRectangle(cornerRadius: NuboDesign.radius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: NuboDesign.radius, style: .continuous)
-                .stroke(NuboDesign.border, lineWidth: 1)
+
+            if let statusMessage = model.permissionStatusMessage {
+                Label(statusMessage, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 14)
+            }
+
+            if let errorMessage = model.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 14)
+            }
         }
     }
 
     private var readyStep: some View {
-        HStack(spacing: 15) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 23))
-            VStack(alignment: .leading, spacing: 4) {
-                Text("This Mac is ready")
-                    .font(.headline)
-                Text("Nubo will stay available from the menu bar. Only paired iPads can connect.")
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("SETUP COMPLETE")
+                .font(.caption.weight(.medium))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+
+            Image(systemName: "checkmark")
+                .font(.system(size: 32, weight: .medium))
+                .padding(.top, 28)
+                .accessibilityHidden(true)
+
+            Text("This Mac is ready")
+                .font(.title.weight(.semibold))
+                .padding(.top, 18)
+            Text("Nubo is available securely from the menu bar whenever this Mac is awake.")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+
+            Divider()
+                .padding(.vertical, 24)
+
+            VStack(alignment: .leading, spacing: 11) {
+                readyRow("Screen Recording")
+                readyRow("Accessibility")
+                readyRow("Local Network")
             }
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NuboDesign.secondaryFill)
-        .clipShape(RoundedRectangle(cornerRadius: NuboDesign.radius, style: .continuous))
+    }
+
+    private func readyRow(_ title: String) -> some View {
+        Label(title, systemImage: "checkmark")
+            .font(.callout)
+            .foregroundStyle(.secondary)
     }
 
     private var footer: some View {
-        HStack {
-            if !model.isReady {
-                Button("Check Again") { model.refreshPermissions() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-            }
+        HStack(spacing: 10) {
             Spacer()
-            if model.isReady {
-                Button("Finish Setup") {
+
+            if let permission = currentPermission {
+                Button(actionTitle(for: permission)) {
+                    if model.requestedPermissions.contains(permission), permission != .localNetwork {
+                        model.openSystemSettings(for: permission)
+                    } else {
+                        model.request(permission)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
+            } else {
+                Button("Start Using Nubo") {
                     model.finishOnboarding()
                     dismissWindow(id: "onboarding")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.primary)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
             }
@@ -171,18 +284,26 @@ struct MacOnboardingView: View {
     private func detail(for permission: PermissionKind) -> String {
         switch permission {
         case .screenRecording:
-            "Nubo captures the selected display only while an authenticated iPad is connected. macOS may ask you to reopen the app."
+            "Your screen is shared only during an authorized connection. You can turn this permission off at any time."
         case .accessibility:
-            "Used only to reproduce mouse and keyboard events received through an encrypted session."
+            "Allows your iPad’s keyboard and pointer to control this Mac. Every session is encrypted."
         case .localNetwork:
-            "Starts a private Bonjour service for discovery. Bonjour is optional later when connecting by hostname or IP."
+            "Makes this Mac visible to Nubo on your network. New iPads still need your approval."
         }
     }
 
     private func actionTitle(for permission: PermissionKind) -> String {
+        if model.requestedPermissions.contains(permission) {
+            return permission == .localNetwork ? "Try Again" : "Open System Settings"
+        }
+        return permission == .localNetwork ? "Start Local Service" : "Request Permission"
+    }
+
+    private func instructions(for permission: PermissionKind) -> String {
         switch permission {
-        case .localNetwork: "Start Local Service"
-        default: "Allow in macOS"
+        case .screenRecording: "1. Open Screen Recording settings.\n2. Turn on Nubo in the list.\n3. Return here, or reopen Nubo if macOS asks."
+        case .accessibility: "1. Open Accessibility settings.\n2. Turn on Nubo in the list.\n3. Return here. We’ll check automatically."
+        case .localNetwork: "Choose Start Local Service below. If macOS asks to find devices on your network, choose Allow."
         }
     }
 }

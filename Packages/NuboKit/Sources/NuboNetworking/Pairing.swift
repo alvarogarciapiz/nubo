@@ -19,10 +19,20 @@ public enum PairingError: Error {
 }
 
 public enum PairingKeyAgreement {
+    /// Commit before revealing keys to prevent adaptive short-code grinding.
+    /// Sorted JSON binds names, IDs, version, nonces and ephemeral public keys.
+    public static func commitment(for hello: PairingHello) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return Data(SHA256.hash(data: try encoder.encode(hello)))
+    }
+
     public static func deriveSecret(
         local: PairingChallenge,
         peerPublicKey: Data,
-        peerNonce: Data
+        peerNonce: Data,
+        localCommitment: Data = Data(),
+        peerCommitment: Data = Data()
     ) throws -> (secret: Data, confirmationCode: String) {
         let publicKey: P256.KeyAgreement.PublicKey
         do {
@@ -31,9 +41,11 @@ public enum PairingKeyAgreement {
             throw PairingError.invalidPeerKey
         }
         let shared = try local.privateKey.sharedSecretFromKeyAgreement(with: publicKey)
-        let transcript = local.publicKey.lexicographicallyPrecedes(peerPublicKey)
-            ? local.publicKey + peerPublicKey + local.nonce + peerNonce
-            : peerPublicKey + local.publicKey + peerNonce + local.nonce
+        let parts: [Data] = local.publicKey.lexicographicallyPrecedes(peerPublicKey)
+            ? [local.publicKey, peerPublicKey, local.nonce, peerNonce, localCommitment, peerCommitment]
+            : [peerPublicKey, local.publicKey, peerNonce, local.nonce, peerCommitment, localCommitment]
+        var transcript = Data()
+        for part in parts { transcript.append(part) }
         let key = shared.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: transcript,

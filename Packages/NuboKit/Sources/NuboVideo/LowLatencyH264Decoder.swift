@@ -1,6 +1,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
+import NuboCore
 @preconcurrency import VideoToolbox
 
 public final class LowLatencyH264Decoder: VideoDecoding, @unchecked Sendable {
@@ -15,13 +16,22 @@ public final class LowLatencyH264Decoder: VideoDecoding, @unchecked Sendable {
         self.output = output
     }
 
-    public func configure(parameterSets: [Data]) throws {
+    public static var supportsHEVC: Bool { VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) }
+
+    public func configure(parameterSets: [Data], codec: VideoCodec = .h264) throws {
         guard parameterSets.count >= 2 else { throw VideoEncoderError.property(-1, "Missing H.264 parameter sets") }
         let nsData = parameterSets.map { $0 as NSData }
         let pointers = nsData.map { $0.bytes.assumingMemoryBound(to: UInt8.self) }
         let sizes = nsData.map(\.length)
         var format: CMFormatDescription?
-        let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+        let status: OSStatus
+        if codec == .hevc {
+            guard parameterSets.count >= 3 else { throw VideoEncoderError.property(-1, "Missing HEVC parameter sets") }
+            status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(allocator: kCFAllocatorDefault,
+                parameterSetCount: pointers.count, parameterSetPointers: pointers, parameterSetSizes: sizes,
+                nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &format)
+        } else {
+        status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
             allocator: kCFAllocatorDefault,
             parameterSetCount: pointers.count,
             parameterSetPointers: pointers,
@@ -29,6 +39,7 @@ public final class LowLatencyH264Decoder: VideoDecoding, @unchecked Sendable {
             nalUnitHeaderLength: 4,
             formatDescriptionOut: &format
         )
+        }
         guard status == noErr, let format else { throw VideoEncoderError.property(status, "H.264 format") }
         invalidate()
         var callback = VTDecompressionOutputCallbackRecord(

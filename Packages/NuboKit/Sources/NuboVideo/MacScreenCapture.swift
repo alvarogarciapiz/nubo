@@ -1,12 +1,14 @@
 #if os(macOS)
+import AppKit
 import CoreMedia
 import CoreVideo
 import Foundation
 import NuboCore
 @preconcurrency import ScreenCaptureKit
 
-public enum ScreenCaptureError: Error {
+public enum ScreenCaptureError: LocalizedError {
     case displayNotFound(DisplayID)
+    public var errorDescription: String? { "The selected Mac display is not currently available. Wake the Mac and check its displays." }
 }
 
 public final class MacScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
@@ -17,6 +19,8 @@ public final class MacScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate,
     private let videoOutput: VideoOutput
     private let audioOutput: AudioOutput?
     private var stream: SCStream?
+    private var streamConfiguration: SCStreamConfiguration?
+    private var showsCursor = true
 
     public init(videoOutput: @escaping VideoOutput, audioOutput: AudioOutput? = nil) {
         self.videoOutput = videoOutput
@@ -25,19 +29,42 @@ public final class MacScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate,
 
     public func availableDisplays() async throws -> [DisplayDescriptor] {
         let content = try await SCShareableContent.current
+        let displayNames: [CGDirectDisplayID: String] = Dictionary(uniqueKeysWithValues: NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            return (CGDirectDisplayID(number.uint32Value), screen.localizedName)
+        })
         return content.displays.map { display in
-            let scale = display.frame.width > 0 ? Double(display.width) / display.frame.width : 1
+            let bounds = CGDisplayBounds(display.displayID)
+            let mode = CGDisplayCopyDisplayMode(display.displayID)
+            let pixelWidth = mode?.pixelWidth ?? display.width
+            let pixelHeight = mode?.pixelHeight ?? display.height
+            let scale = bounds.width > 0 ? Double(pixelWidth) / bounds.width : 1
             return DisplayDescriptor(
                 id: DisplayID(rawValue: display.displayID),
-                name: "Display \(display.displayID)",
-                pixelWidth: display.width,
-                pixelHeight: display.height,
+                name: displayNames[display.displayID] ?? "Display \(display.displayID)",
+                pixelWidth: pixelWidth,
+                pixelHeight: pixelHeight,
                 scale: scale,
-                originX: Double(display.frame.origin.x),
-                originY: Double(display.frame.origin.y),
-                isPrimary: display.frame.origin == .zero
+                originX: Double(bounds.origin.x),
+                originY: Double(bounds.origin.y),
+                isPrimary: display.displayID == CGMainDisplayID()
             )
         }
+    }
+
+    @MainActor
+    public func previewJPEG() async throws -> Data? {
+        let content = try await SCShareableContent.current
+        guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else { return nil }
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = 480
+        config.height = max(2, Int(480 * Double(display.height) / Double(max(1, display.width))))
+        config.showsCursor = false
+        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        return NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.55])
     }
 
     public func start(displayID: DisplayID, configuration: StreamConfiguration, capturesAudio: Bool) async throws {
@@ -54,12 +81,22 @@ public final class MacScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate,
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         }
         self.stream = stream
+        self.streamConfiguration = streamConfiguration
         try await stream.startCapture()
     }
 
     public func update(configuration: StreamConfiguration, capturesAudio: Bool = false) async throws {
         guard let stream else { return }
-        try await stream.updateConfiguration(makeStreamConfiguration(configuration, capturesAudio: capturesAudio))
+        let updated = makeStreamConfiguration(configuration, capturesAudio: capturesAudio)
+        try await stream.updateConfiguration(updated)
+        streamConfiguration = updated
+    }
+
+    public func setShowsCursor(_ visible: Bool) async throws {
+        guard showsCursor != visible, let stream, let streamConfiguration else { return }
+        showsCursor = visible
+        streamConfiguration.showsCursor = visible
+        try await stream.updateConfiguration(streamConfiguration)
     }
 
     public func stop() async throws {
@@ -93,7 +130,7 @@ public final class MacScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate,
         result.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(configuration.framesPerSecond))
         result.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         result.queueDepth = 2
-        result.showsCursor = true
+        result.showsCursor = showsCursor
         result.capturesAudio = capturesAudio
         result.sampleRate = 48_000
         result.channelCount = 2

@@ -3,8 +3,10 @@ import Foundation
 public enum NuboConstants {
     public static let serviceType = "_nubo._tcp"
     public static let defaultPort: UInt16 = 49_832
-    public static let protocolVersion: UInt16 = 1
+    public static let protocolVersion: UInt16 = 5
 }
+
+public enum VideoCodec: String, Codable, Sendable { case h264, hevc }
 
 public struct DisplayID: RawRepresentable, Codable, Hashable, Sendable {
     public let rawValue: UInt32
